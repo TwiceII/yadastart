@@ -28,6 +28,7 @@
 (defmethod yada.security/verify
   :jwt
   [ctx {:keys [cookie yada.jwt/secret] :or {cookie "session"} :as scheme}]
+  (println "verify!")
   (when-not secret (throw (ex-info "Buddy JWT verifier requires a secret entry in scheme" {:scheme scheme})))
   (try
     (let [auth (some->
@@ -35,8 +36,10 @@
                 (jwt/unsign secret))]
       auth)
     (catch ExceptionInfo e
-      (if-not (= (ex-data e)
-                 {:type :validation :cause :signature})
+      (if-not (or (= (ex-data e)
+                     {:type :validation :cause :signature})
+                  (= (ex-data e)
+                     {:type :validation :cause :exp}))
         (throw e)
         )
       )))
@@ -57,7 +60,7 @@
   (yada/resource {:id ::login
                   :methods {:get {:produces {:media-type "text/html"}
                                   :response (fn [ctx] (respond-with-file ctx
-                                                                         (new java.io.File "resources/templates/login.html")
+                                                                         (new java.io.File "resources/public/templates/login.html")
                                                                          nil))}
                             :post {:produces "application/json"
                                    :consumes "application/x-www-form-urlencoded"
@@ -100,13 +103,20 @@
 (def default-jwt-auth-scheme {:authentication-schemes [{:scheme :jwt
                                                         :yada.jwt/secret secret}]})
 
+(declare bidi-routes)
+
+(defn redirect-response
+  [ctx target-route-id]
+  (assoc
+    (:response ctx)
+    :status 302
+    :headers {"location" (bidi/path-for bidi-routes target-route-id)}))
+
 (defn redirection-response-map
   [target-route-id]
   {:produces "text/plain"
    :response (fn[ctx]
-               (assoc (:response ctx)
-                 :status 302
-                 :headers {"location" "/login"}))})
+               (redirect-response ctx target-route-id))})
 
 ;;                (let [uri-info (:uri-info ctx)]
 ;;                    (when (nil? uri-info)
@@ -125,54 +135,49 @@
   {:access-control (-> default-jwt-auth-scheme
                        (assoc :authorization {:methods authorization-methods}))
    :responses {403 (redirection-response-map ::login)
-
-;;                {:produces "text/plain"
-;;                     :response (fn[ctx] (-> "403. Access denied"))}
                401 (redirection-response-map ::login)}})
-;;                {:produces "text/plain"
-;;                     :response (fn[ctx] (-> "401. Authenticate first"))}}})
 
 
-
+(def index-res
+  (yada/resource
+    {:id ::index
+     :produces {:media-type "text/html"}
+     :methods {:get
+               {:response (fn[ctx]
+                            ;; если авторизован
+                            (if (yada.security/verify ctx
+                                                      {:scheme :jwt
+                                                       :yada.jwt/secret secret})
+                              ;; редиректим на глав.страницу приложения
+                              (redirect-response ctx ::app-main-page)
+                              ;; иначе просто показываем главную
+                              (respond-with-file ctx
+                                                 (new java.io.File "resources/public/templates/index.html")
+                                                 nil)))}}}))
 
 (def bidi-routes
-  ["" {[] (yada/redirect ::login)
-;;        (yada/resource {:id ::index
-;;                           :produces {:media-type "text/plain"}
-;;                           :methods {:get
-;;                                      {:response (fn[ctx](-> "hey there!"))}}})
+  ["" [["/" index-res]
+       ["/login"  login-res]
+       ["/app" (yada/resource
+                 (merge (default-access-control {:get "private/view"})
+                        {:id ::app-main-page
+                         :produces "text/plain"
+                         :methods {:get
+                                   {:response (fn [ctx] (-> "app main page"))}}}))]
+       ["/open" (yada/resource
+                  {:id ::open-resource
+                   :produces "text/plain"
+                   :methods {:get
+                             {:response (fn [ctx] (-> "open resource"))}}})]
+       ["/private" (yada/resource
+                     (merge (default-access-control {:get "private/view"})
+                            {:id ::private-resource
+                             :produces "text/plain"
+                             :methods {:get
+                                       {:response (fn [ctx] (-> "private resource"))}}}))]
+       ["" (yada/yada (new-classpath-resource "public"))]]
+   ])
 
-       "/login"  login-res
-
-;;              (yada/resource {:id ::login
-;; ;;                                 :produces {:media-type "text/plain"}
-;; ;;                                 :methods {:get
-;; ;;                                      {:response (fn[ctx](-> "login!2"))}}})
-
-;;                                 :methods {:get
-;;                                           {:produces {:media-type "text/html"}
-;;                                            :response (fn[ctx]
-;;                                                        (let [res (io/resource "login.html")]
-;;                                                          (println res)
-;;                                                          res))}}})
-
-       ;; works
-       "/open" (yada/resource
-                 {:id ::open-resource
-                  :produces "text/plain"
-                  :methods {:get
-                            {:response (fn [ctx] (-> "open resource"))}}})
-
-       ;; doesn't work
-       "/private" (yada/resource
-                    (merge (default-access-control {:get "private/view2"})
-                           {:id ::private-resource
-                            :produces "text/plain"
-                            :methods {:get
-                                      {:response (fn [ctx] (-> "private resource"))}}}))
-
-       "" (new-classpath-resource "public")
-       }])
 
 ;;;
 ;;; Server functions
